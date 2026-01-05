@@ -285,7 +285,7 @@ class BRNullSpaceRunner(Runner):
             self.cfg.get('model_wrapper_cfg'), self.model)
 
         # get model name from the model class
-        if hasattr(self.model, 'module'):
+        if is_model_wrapper(self.model):
             self._model_name = self.model.module.__class__.__name__
         else:
             self._model_name = self.model.__class__.__name__
@@ -363,6 +363,7 @@ class BRNullSpaceRunner(Runner):
             experiment_name=cfg.get('experiment_name'),
             task_id=cfg.get('task_id'),
             previous_dir=cfg.get('previous_dir'),
+            ckpt_keywords=cfg.get('ckpt_keywords'),
             cfg=cfg,
         )
 
@@ -771,10 +772,14 @@ class BRNullSpaceRunner(Runner):
         print(len(self.train_dataloader))
         for idx, data_batch in tqdm(enumerate(self.train_dataloader), disable=False):
             # with self.optim_wrapper.optim_context(self):
-            data = self.model.module.data_preprocessor(data_batch, True)
+            if is_model_wrapper(self.model):
+                model = self.model.module
+            else:
+                model = self.model
+            data = model.data_preprocessor(data_batch, True)
             # print([i.gt_instances.labels.unique() for i in data["data_samples"]])
             losses = self.model._run_forward(data, mode='loss')  # type: ignore
-            parsed_losses, log_vars = self.model.module.parse_losses(losses)
+            parsed_losses, log_vars = model.parse_losses(losses)
             loss = self.optim_wrapper.scale_loss(parsed_losses)
             self.optim_wrapper.backward(loss)
             

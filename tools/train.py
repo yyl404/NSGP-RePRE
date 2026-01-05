@@ -123,4 +123,6 @@ def main():
 
 
 if __name__ == '__main__':
+    import setproctitle
+    setproctitle.setproctitle('yyl-nsgp')
     main()

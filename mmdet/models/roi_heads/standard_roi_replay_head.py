@@ -160,7 +160,10 @@ class StandardRoIReplayHead(StandardRoIHead):
             cls_target, cls_weight, bbox_target, bbox_weight = self.bbox_head.get_roi_targets(sampling_results=sampling_results,
                 rcnn_train_cfg=self.train_cfg)
         
-        mask = cls_target != 20 if VOC else 80 # Default 20 for VOC, this will raise an error as the variant 'VOC' doesn't exists.
+        # Filter out background class: background class ID equals num_classes
+        # (VOC: num_classes=20, background=20; COCO: num_classes=80, background=80)
+        bg_class_id = self.bbox_head.num_classes
+        mask = cls_target != bg_class_id
         
         target_count = 5
         

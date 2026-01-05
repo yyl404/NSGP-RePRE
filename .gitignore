@@ -89,3 +89,5 @@ temp/
 tmp/
 
 pretrained/
+work_dirs/
+data

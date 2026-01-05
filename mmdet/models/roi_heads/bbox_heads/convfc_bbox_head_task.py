@@ -287,6 +287,40 @@ class ConvFCBBoxHeadTask(BBoxHead):
             bbox_pred = torch.cat(preds, dim=-1)
         return cls_score, bbox_pred
     
+    def get_mid_features(self, x: Tensor) -> Tensor:
+        """Extract intermediate features before shared FC layers.
+        
+        This method extracts features after flattening but before passing 
+        through shared FC layers. For Shared2FCBBoxHeadTask, this corresponds 
+        to features after flattening the RoI features (7*7*256 = 12544).
+        
+        Args:
+            x (Tensor): Input features from bbox_roi_extractor and 
+                optional shared_head, shape (N, C, H, W).
+        
+        Returns:
+            Tensor: Features after flattening but before shared FC layers.
+                For Shared2FCBBoxHeadTask, this is flattened RoI features
+                with shape (N, 7*7*256) = (N, 12544).
+        """
+        # shared part - process conv layers if any
+        if self.num_shared_convs > 0:
+            for conv in self.shared_convs:
+                x = conv(x)
+        
+        # For shared FC layers, return features after flattening but before FC
+        if self.num_shared_fcs > 0:
+            if self.with_avg_pool:
+                x = self.avg_pool(x)
+            
+            # Flatten and return (don't pass through FC layers)
+            x = x.flatten(1)
+            return x
+        else:
+            # If no shared FCs, just flatten if needed
+            if x.dim() > 2:
+                x = x.flatten(1)
+            return x
     
     def get_relu(self, x: Tuple[Tensor]) -> tuple:
         """Forward features from the upstream network.
