@@ -1,6 +1,6 @@
 _base_ = [
     '../_base_/models/faster-rcnn_r50_fpn.py',
-    f'../_base_/datasets/voc_15_5_task1_2007.py',
+    f'../_base_/datasets/voc_10_10_task2_2007.py',
     '../_base_/schedules/schedule_1x_sgdnscl.py', '../_base_/brnsrunetime.py'
 ]
 
@@ -11,12 +11,12 @@ _base_ = [
 #   3、ns3_split_id: ns_split_id
 # ====================================================================
 
-task_id = 1
-train_task_split = [0, 15, 20]
+task_id = 2
+train_task_split = [0, 10, 20]
 
 offset = 0.0
 ignore_keys = ["rpn", "roi_head"]
-previous_dir = f'./work_dirs/ns3_split_id/cl_faster_rcnn_ns3_split_id_15_5_{task_id-1}'
+previous_dir = f'./work_dirs/ns3_split_id/cl_faster_rcnn_ns3_split_id_10_10_{task_id-1}'
 ckpt_keywords='best'
 
 max_prototype = 10
@@ -143,4 +143,4 @@ model = dict(
         # e.g., nms=dict(type='soft_nms', iou_threshold=0.5, min_score=0.05)
     ))
 
-work_dir=f'./work_dirs/ns3_split_id/cl_faster_rcnn_ns3_split_id_15_5_{task_id}'
+work_dir=f'./work_dirs/ns3_split_id/cl_faster_rcnn_ns3_split_id_10_10_{task_id}'

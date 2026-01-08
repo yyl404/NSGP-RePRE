@@ -65,7 +65,24 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 
+# ========== NEW FUNCTION: all_gather_different_shape ==========
+# Original Runner: Does not have this function
+# Purpose: Gather tensors with different shapes across GPUs in distributed training
+# This is needed because RoI features from different GPUs may have different batch sizes
+# after data preprocessing and filtering
 def all_gather_different_shape(t):
+    """Gather tensors with potentially different shapes across all GPUs.
+    
+    This function handles the case where tensors from different GPUs have different
+    batch dimensions (first dimension). It first communicates the batch size,
+    then gathers the tensors with appropriate padding.
+    
+    Args:
+        t (Tensor): Input tensor with shape (N, ...) where N may differ across GPUs.
+        
+    Returns:
+        list[Tensor]: List of tensors from all GPUs, each with shape (N_i, ...).
+    """
     bs = torch.Tensor([t.shape[0]])
     t_shape = list(t.shape)
     world_size = get_world_size()
@@ -86,6 +103,7 @@ def all_gather_different_shape(t):
         all_reduce(tmp_t)
         res.append(tmp_t)
     return res
+# ========== END NEW FUNCTION ==========
         
 
 
@@ -120,9 +138,16 @@ class BRNullSpaceRunner(Runner):
         default_scope: str = 'mmengine',
         randomness: Dict = dict(seed=None),
         experiment_name: Optional[str] = None,
+        # ========== MODIFICATION START: Add incremental learning parameters ==========
+        # Original Runner: Does not have task_id, previous_dir, ckpt_keywords parameters
+        # Modified version: Added parameters for incremental learning support
+        # - task_id: Current task identifier in incremental learning (starts from 1)
+        # - previous_dir: Directory path of previous task for loading checkpoints and features
+        # - ckpt_keywords: Keywords to match checkpoint filenames when loading from previous_dir
         task_id: Optional[int] = None,
         previous_dir: Optional[str] = None,
         ckpt_keywords: Optional[str] = None,
+        # ========== MODIFICATION END ==========
         cfg: Optional[ConfigType] = None,
     ):
         self._work_dir = osp.abspath(work_dir)
@@ -253,6 +278,10 @@ class BRNullSpaceRunner(Runner):
         if self.cfg:
             self.visualizer.add_config(self.cfg)
 
+        # ========== MODIFICATION START: Incremental learning task management ==========
+        # Original Runner: Does not handle task-based incremental learning
+        # Modified version: Added task tracking and checkpoint loading from previous tasks
+        # This enables NSGP-RePRE to work with sequential tasks in incremental learning scenarios
         # 记录上一个任务的位置
         # # Null Space计算用的feature in
         self.task_id = task_id if task_id is not None else 1
@@ -262,11 +291,13 @@ class BRNullSpaceRunner(Runner):
         if self.previous_dir == None or not osp.exists(self.previous_dir):
             assert self.task_id == 1, f"Error, previous task dir should be fed into the runner."
         
+        # Auto-load checkpoint from previous task if load_from is not specified
         if self.previous_dir != None and load_from == None:
             for i in os.listdir(self.previous_dir):
                 if self.ckpt_keywords in i:
                     break
             load_from = osp.join(self.previous_dir, i)
+        # ========== MODIFICATION END ==========
             
         self._load_from = load_from
         self._resume = resume
@@ -284,11 +315,16 @@ class BRNullSpaceRunner(Runner):
         self.model = self.wrap_model(
             self.cfg.get('model_wrapper_cfg'), self.model)
 
+        # ========== MODIFICATION START: Model name extraction with wrapper check ==========
+        # Original Runner: Directly accesses self.model.module without checking if wrapped
+        # Modified version: Uses is_model_wrapper() to safely handle both wrapped and unwrapped models
+        # This ensures compatibility with both distributed (DDP) and non-distributed training
         # get model name from the model class
         if is_model_wrapper(self.model):
             self._model_name = self.model.module.__class__.__name__
         else:
             self._model_name = self.model.__class__.__name__
+        # ========== MODIFICATION END ==========
 
         self._hooks: List[Hook] = []
         # register hooks to `self._hooks`
@@ -298,8 +334,15 @@ class BRNullSpaceRunner(Runner):
                          f'order:\n{self.get_hooks_info()}')
 
         
+        # ========== MODIFICATION START: NSGP-RePRE specific initialization ==========
+        # Original Runner: Does not initialize NSGP-RePRE specific attributes
+        # Modified version: Initializes paths, thresholds, and data structures for:
+        # - Covariance matrix computation (NSGP)
+        # - RoI feature replay (RePRE)
+        # - EWC regularization terms
         self.logger.info(f"Task id start from 1, Current Task id = {task_id}")
         
+        # Paths for saving/loading covariance matrices (used in NSGP)
         self.fea_in_save_path = osp.join(self.work_dir, "covariance.pth")
         if self.previous_dir != None:
             self.fea_in_load_path = osp.join(self.previous_dir, "covariance.pth")
@@ -307,17 +350,23 @@ class BRNullSpaceRunner(Runner):
             self.fea_in_load_path = None
         self.fea_in_load_path = cfg.get("fea_in_load_path") if cfg.get("fea_in_load_path") else self.fea_in_load_path
         
+        # Keys to ignore when computing covariance (e.g., classifier heads, teacher model)
         self.ignore_keys = cfg.get('ignore_keys') + ["roi_head.bbox_head.fc_cls", "roi_head.bbox_head.fc_reg", "teacher"] if cfg.get('ignore_keys') else ["roi_head.bbox_head.fc_cls", "roi_head.bbox_head.fc_reg", "teacher"]
+        # Pseudo-labeling thresholds: [rpn_thresh, roi_thresh]
         self.rr_thresh = cfg.get("rr_thresh") if cfg.get("rr_thresh") else [0.5, 0.5]
+        # Offset for null space gradient projection
         self.offset = cfg.get('offset') if cfg.get('offset') else 0.0
+        # Number of RoI features to reserve per class for replay
         self.reserve_per_class = cfg.get('reserve_per_class') if cfg.get('reserve_per_class') != None else 0
         self.fea_in_hook = {}
         self.is_trained = cfg.get('is_trained') if cfg.get('is_trained') else False
         
+        # Data structures for covariance computation
         self.fea_in = defaultdict(dict)
         self.fea_in_count = defaultdict(int)
-        # 用在BN上的EWC用参数
+        # EWC regularization terms (importance weights and previous task parameters)
         self.ewc_reg_terms = {}
+        # ========== MODIFICATION END ==========
         # dump `cfg` to `work_dir`
         self.dump_config()
         
@@ -361,9 +410,13 @@ class BRNullSpaceRunner(Runner):
             default_scope=cfg.get('default_scope', 'mmengine'),
             randomness=cfg.get('randomness', dict(seed=None)),
             experiment_name=cfg.get('experiment_name'),
+            # ========== MODIFICATION START: Pass incremental learning parameters ==========
+            # Original Runner.from_cfg: Does not pass task_id, previous_dir, ckpt_keywords
+            # Modified version: Extracts and passes these parameters from config for incremental learning
             task_id=cfg.get('task_id'),
             previous_dir=cfg.get('previous_dir'),
             ckpt_keywords=cfg.get('ckpt_keywords'),
+            # ========== MODIFICATION END ==========
             cfg=cfg,
         )
 
@@ -379,9 +432,14 @@ class BRNullSpaceRunner(Runner):
             ori_model = self.model.module
         else:
             ori_model = self.model
-                
+        
+        # ========== MODIFICATION START: Set pseudo-labeling thresholds ==========
+        # Original Runner.train: Does not set pseudo-labeling thresholds
+        # Modified version: Sets thresholds for teacher-student pseudo-labeling
+        # These thresholds control which pseudo-labels are used for RPN and RoI head training
         ori_model.rpn_thresh = self.rr_thresh[0]
         ori_model.roi_thresh = self.rr_thresh[1]
+        # ========== MODIFICATION END ==========
                 
                 
         assert hasattr(ori_model, 'train_step'), (
@@ -406,6 +464,11 @@ class BRNullSpaceRunner(Runner):
         # `build_optimizer` should be called before `build_param_scheduler`
         #  because the latter depends on the former
         self.optim_wrapper = self.build_optim_wrapper(self.optim_wrapper)
+        # ========== MODIFICATION START: Record parameter names for optimizer groups ==========
+        # Original Runner.train: Does not track parameter names in optimizer groups
+        # Modified version: Associates parameter names with optimizer parameter groups
+        # This is required by NSGP optimizer to identify which parameters belong to which group
+        # for gradient projection and null space computation
         # assign names to the params
         recorder = {}
         for i, group in enumerate(self.optim_wrapper.optimizer.param_groups):
@@ -419,6 +482,7 @@ class BRNullSpaceRunner(Runner):
                 i = recorder[id(param)]
                 self.optim_wrapper.optimizer.param_groups[i]["params"] += [param]
                 self.optim_wrapper.optimizer.param_groups[i]["names"] += [name]
+        # ========== MODIFICATION END ==========
         # Automatically scaling lr by linear scaling rule
         self.scale_lr(self.optim_wrapper, self.auto_scale_lr)
 
@@ -435,8 +499,13 @@ class BRNullSpaceRunner(Runner):
         # initialize the model weights
         self._init_model_weights()
         
+        # ========== MODIFICATION START: Save background class weights ==========
+        # Original Runner.train: Does not save background class weights
+        # Modified version: Saves background class (num_classes) weights and bias
+        # These may be used for incremental learning head initialization
         bg_weight = ori_model.roi_head.bbox_head.fc_cls[-1].weight.data.detach().clone()
         bg_bias = ori_model.roi_head.bbox_head.fc_cls[-1].bias.data.detach().clone()
+        # ========== MODIFICATION END ==========
 
         # try to enable activation_checkpointing feature
         modules = self.cfg.get('activation_checkpointing', None)
@@ -452,34 +521,49 @@ class BRNullSpaceRunner(Runner):
                              f' for sub-modules: {modules}')
             turn_on_efficient_conv_bn_eval(ori_model, modules)
 
+        # ========== MODIFICATION START: Initialize teacher model for incremental learning ==========
+        # Original Runner.train: Does not create teacher model
+        # Modified version: Creates a frozen copy of the current model as teacher for pseudo-labeling
+        # Teacher model is used to generate pseudo-labels for old tasks during incremental learning
         # make sure checkpoint-related hooks are triggered after `before_run`
         if self.task_id != 1 and "joint" not in self.work_dir:
             ori_model.teacher_model = copy.deepcopy(ori_model)
+            # Set teacher model's task_id to previous task (task_id - 1) for correct prediction
+            ori_model.teacher_model.roi_head.bbox_head.task_id = self.task_id - 1
             ori_model.roi_head.teacher_model = ori_model.teacher_model.roi_head
         
         self.load_or_resume()
         
         if self.task_id != 1 and not self.is_trained:
+            # Re-create teacher model after loading checkpoint (since checkpoint may overwrite it)
             if "joint" not in self.work_dir:
                 if hasattr(ori_model, 'teacher_model'):
                     del ori_model.teacher_model
                 ori_model.teacher_model = copy.deepcopy(ori_model)
+                # Set teacher model's task_id to previous task (task_id - 1) for correct prediction
+                ori_model.teacher_model.roi_head.bbox_head.task_id = self.task_id - 1
                 ori_model.roi_head.teacher_model = ori_model.teacher_model.roi_head
+            # Freeze teacher model parameters
             for name, param in ori_model.named_parameters():
                 if "teacher" in name:
                     param.requires_grad_(False)
             
             assert self._resume == False, "Resume from trained model are not allowed! Because teacher model is initialized with ckpt in self.load_from. Resuming from ckpt will degrade your teacher performance in old Tasks."
             
+            # Update optimizer transforms based on null space projection
             self.update_optim_transforms(self.train_dataloader)
+            self.update_model_transforms(self.train_dataloader)
             
+            # Load EWC importance weights from previous tasks
             self.load_importance()
             if is_model_wrapper(self.model):
                 model = self.model.module
             else:
                 model = self.model
+            # Wrap loss function with EWC regularization hook
             if "joint" not in self.work_dir:
                 model.loss = EWCHook(module=model, reg_params=self.reg_params, ewc_reg_terms=self.ewc_reg_terms)
+        # ========== MODIFICATION END ==========
 
         # Initiate inner count of `optim_wrapper`.
         self.optim_wrapper.initialize_count_status(
@@ -495,10 +579,18 @@ class BRNullSpaceRunner(Runner):
         if not self.is_trained:  
             model = self.train_loop.run()  # type: ignore
         self.call_hook('after_run')
+        # ========== MODIFICATION START: Post-training computations for incremental learning ==========
+        # Original Runner.train: Returns model after training loop completes
+        # Modified version: After training, computes and saves:
+        # 1. Parameter importance for EWC (Elastic Weight Consolidation)
+        # 2. Feature covariance matrices for NSGP (Null Space Gradient Projection)
+        # 3. RoI features for RePRE (Regional Prototype Replay)
+        # These are used in subsequent tasks to prevent catastrophic forgetting
         self._has_loaded = False
         self.calculate_save_importance(self.train_dataloader)
         self.cal_fea_in(self.train_dataloader)
         self.cal_rois(self.train_dataloader)
+        # ========== MODIFICATION END ==========
         return model    
     
     
@@ -523,10 +615,22 @@ class BRNullSpaceRunner(Runner):
         # self.calculate_save_importance(self.train_dataloader)
         metrics = self.test_loop.run()  # type: ignore
         self.call_hook('after_run')
+        # ========== MODIFICATION START: Post-test computations for incremental learning ==========
+        # Original Runner.test: Returns metrics after test loop completes
+        # Modified version: After testing, computes and saves:
+        # 1. Feature covariance matrices for NSGP
+        # 2. Parameter importance for EWC
+        # Note: Order is different from train() - cal_fea_in is called before calculate_save_importance
         self.cal_fea_in(self.train_dataloader)
         self.calculate_save_importance(self.train_dataloader)
+        # ========== MODIFICATION END ==========
         return metrics
    
+    # ========== NEW METHOD: update_optim_transforms ==========
+    # Original Runner: Does not have this method
+    # Purpose: Updates optimizer with null space gradient projection transforms
+    # This computes the null space of previous tasks' feature covariance matrices
+    # and applies gradient projection during optimization to prevent catastrophic forgetting
     @torch.no_grad()
     def update_optim_transforms(self, train_loader):
         
@@ -558,6 +662,45 @@ class BRNullSpaceRunner(Runner):
         torch.cuda.empty_cache()        
 
     
+    def update_model_transforms(self, train_loader):
+        
+        if is_model_wrapper(self.model):
+            model = self.model.module
+        else:
+            model = self.model
+
+        def check_if_ignore(n):
+            ignore = False
+            for ignore_key in self.ignore_keys:
+                ignore = ignore or bool(re.match(ignore_key, n))
+
+            if not ignore:
+                self.logger.info(f"** {n}")
+            return ignore
+            
+        self.logger.info(f"Load Covariance from {self.fea_in_load_path}")
+        self.fea_in = torch.load(self.fea_in_load_path, map_location=next(model.parameters()).device)
+        self.fea_in = {k: v for k, v in self.fea_in.items() if not check_if_ignore(k)}
+        
+        self.optim_wrapper.optimizer.get_eigens(self.fea_in)
+
+        self.optim_wrapper.optimizer.get_transforms(offset=self.offset)
+        
+        del self.fea_in
+        
+        print("Done getting eigens and transforms.")
+        torch.cuda.empty_cache()
+
+    # ========== NEW METHOD: cal_fea_in ==========
+    # Original Runner: Does not have this method
+    # Purpose: Calculates and saves input feature covariance matrices for NSGP
+    # This method:
+    # 1. Loads the trained model checkpoint
+    # 2. Registers forward hooks to capture input features for Linear and Conv2d layers
+    # 3. Computes covariance matrices of these features across the training set
+    # 4. Aggregates results across multiple GPUs
+    # 5. Optionally accumulates with previous tasks' covariance matrices
+    # 6. Saves the result to covariance.pth for use in subsequent tasks
     @torch.no_grad()
     def cal_fea_in(self, train_loader):
         self.logger.info("Doing cal_fea_in......")
@@ -620,6 +763,16 @@ class BRNullSpaceRunner(Runner):
         torch.cuda.empty_cache()        
         
         
+    # ========== NEW METHOD: cal_rois ==========
+    # Original Runner: Does not have this method
+    # Purpose: Extracts and saves RoI features along with their targets for RePRE
+    # This method:
+    # 1. Loads the trained model checkpoint
+    # 2. Extracts RoI features, classification targets, regression targets, and RoI boxes
+    # 3. Aggregates results across multiple GPUs
+    # 4. Optionally samples a fixed number of features per class (reserve_per_class)
+    # 5. Optionally merges with previous tasks' RoI data
+    # 6. Saves the result to rois_etc.pth for replay in subsequent tasks
     @torch.no_grad()
     def cal_rois(self, train_loader):
         self.logger.info("Doing cal_rois......")
@@ -714,10 +867,24 @@ class BRNullSpaceRunner(Runner):
         # get_distinguisher: two parts: optimizer + part
         torch.cuda.empty_cache()        
 
+    # ========== NEW METHOD: compute_cov ==========
+    # Original Runner: Does not have this method
+    # Purpose: Forward hook to compute covariance matrices of input features
+    # This hook is registered on Linear and Conv2d layers during cal_fea_in()
+    # It extracts input features, processes them appropriately (flatten for Conv2d),
+    # and accumulates covariance matrices for NSGP computation
     def compute_cov(self, module, fea_in, fea_out):
-        '''
-        Hook, 每经过一层，就计算一次covariance。
-        '''
+        """Forward hook to compute covariance of input features for NSGP.
+        
+        This hook is called during forward pass for each registered module.
+        For Linear layers: Computes covariance of input features directly.
+        For Conv2d layers: Uses unfold to extract local patches before computing covariance.
+        
+        Args:
+            module: The module (Linear or Conv2d) that triggered this hook.
+            fea_in: Input features to the module (tuple, first element is the tensor).
+            fea_out: Output features from the module (not used).
+        """
         if is_model_wrapper(self.model):
             model = self.model.module
         else:
@@ -749,14 +916,35 @@ class BRNullSpaceRunner(Runner):
         return None
 
 
+    # ========== NEW METHOD: update_cov ==========
+    # Original Runner: Does not have this method
+    # Purpose: Accumulates covariance matrices computed from input features
+    # Called by compute_cov() hook to update the running covariance estimate
     def update_cov(self, fea_in, k):
+        """Update covariance matrix for a given layer.
+        
+        Args:
+            fea_in: Input features with shape (N, C) for Linear or (N*H*W, C) for Conv2d.
+            k: Layer name (module path + ".weight").
+        """
         cov = torch.mm(fea_in.transpose(0, 1), fea_in)
         if len(self.fea_in[k]) == 0:
             self.fea_in[k] = cov
         else:
             self.fea_in[k] = self.fea_in[k] + cov
          
+    # ========== NEW METHOD: calculate_save_importance ==========
+    # Original Runner: Does not have this method
+    # Purpose: Calculates and saves parameter importance for EWC (Elastic Weight Consolidation)
+    # This method:
+    # 1. Iterates through the training data
+    # 2. Performs forward and backward passes to compute gradients
+    # 3. Accumulates squared gradients as importance weights (Fisher Information Matrix diagonal)
+    # 4. Saves importance weights and current parameter values to ewc_reg_terms_ewc.pth
+    # These are used in subsequent tasks to add regularization terms that penalize
+    # changes to important parameters from previous tasks
     def calculate_save_importance(self, dataloader):
+        """Calculate and save parameter importance for EWC regularization."""
         self.logger.info("cal importance")
 
         self.register_params()
@@ -772,6 +960,9 @@ class BRNullSpaceRunner(Runner):
         print(len(self.train_dataloader))
         for idx, data_batch in tqdm(enumerate(self.train_dataloader), disable=False):
             # with self.optim_wrapper.optim_context(self):
+            # ========== MODIFICATION START: Use is_model_wrapper for distributed compatibility ==========
+            # Original Runner: May directly access self.model.module without checking
+            # Modified version: Uses is_model_wrapper() to safely handle both wrapped and unwrapped models
             if is_model_wrapper(self.model):
                 model = self.model.module
             else:
@@ -780,6 +971,7 @@ class BRNullSpaceRunner(Runner):
             # print([i.gt_instances.labels.unique() for i in data["data_samples"]])
             losses = self.model._run_forward(data, mode='loss')  # type: ignore
             parsed_losses, log_vars = model.parse_losses(losses)
+            # ========== MODIFICATION END ==========
             loss = self.optim_wrapper.scale_loss(parsed_losses)
             self.optim_wrapper.backward(loss)
             
@@ -797,11 +989,26 @@ class BRNullSpaceRunner(Runner):
         torch.save(self.ewc_reg_terms, osp.join(self.work_dir, "ewc_reg_terms_ewc.pth"))
         self.logger.info("cal importance done")
         
+    # ========== NEW METHOD: load_importance ==========
+    # Original Runner: Does not have this method
+    # Purpose: Loads EWC importance weights from previous tasks
+    # Called before training to set up EWC regularization terms
     def load_importance(self):
+        """Load EWC importance weights from previous tasks."""
         self.register_params()
         self.ewc_reg_terms = torch.load(osp.join(self.previous_dir, "ewc_reg_terms_ewc.pth"), map_location=list(self.reg_params.values())[0].device)
     
+    # ========== NEW METHOD: register_params ==========
+    # Original Runner: Does not have this method
+    # Purpose: Registers model parameters that should be regularized by EWC
+    # Only parameters matching certain patterns (e.g., containing "bn" for BatchNorm)
+    # and not matching ignore patterns (e.g., "teacher_model") are registered
     def register_params(self):
+        """Register parameters for EWC regularization.
+        
+        Only parameters matching must_names (e.g., "bn" for BatchNorm) and
+        not matching ignore_names (e.g., "teacher_model") are registered.
+        """
         self.reg_params = {}
         ignore_names = ["teacher_model"]
         must_names = ["bn"]
@@ -823,7 +1030,22 @@ class BRNullSpaceRunner(Runner):
             if ignore and must:
                 self.reg_params[n] = p
         
+# ========== NEW CLASS: EWCHook ==========
+# Original Runner: Does not have this class
+# Purpose: Wraps the model's loss function to add EWC regularization terms
+# EWC penalizes changes to parameters that were important in previous tasks,
+# preventing catastrophic forgetting by constraining the optimization space
 class EWCHook:
+    """Hook to add EWC (Elastic Weight Consolidation) regularization to loss function.
+    
+    This class wraps the original loss function and adds a regularization term
+    that penalizes deviation from previous task parameters, weighted by their importance.
+    
+    Args:
+        module: The model module.
+        reg_params: Dictionary of parameter names to parameter tensors to regularize.
+        ewc_reg_terms: Dictionary containing 'importance' and 'task_param' for each parameter.
+    """
     def __init__(self, module, reg_params, ewc_reg_terms):
         self.module = module
         self.reg_params = reg_params

@@ -91,3 +91,4 @@ tmp/
 pretrained/
 work_dirs/
 data
+*.pth

@@ -1,4 +1,4 @@
-your_devices=1
+your_devices=2
 
 CFGS=(
     cl_faster_rcnn_cfgs/incremental_task/cl_faster_rcnn_nsgp_repre_15_5_1.py

@@ -2,7 +2,7 @@
 dataset_type = 'VOCTask'
 data_root = 'data/VOCdevkit'
 task_id = 2
-train_task_split = [0, 15, 20]
+train_task_split = [0, 10, 20]
 val_task_split = [0, train_task_split[task_id]]
 # Example to use different file client
 # Method 1: simply set the data root and let the file I/O module
