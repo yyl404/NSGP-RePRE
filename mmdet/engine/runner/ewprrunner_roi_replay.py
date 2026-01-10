@@ -109,7 +109,7 @@ def all_gather_different_shape(t):
 
 
 @RUNNERS.register_module()
-class BRNullSpaceRunner(Runner):
+class EWPRRunner(Runner):
     def __init__(
         self,
         model: Union[nn.Module, Dict],
@@ -550,8 +550,8 @@ class BRNullSpaceRunner(Runner):
             
             assert self._resume == False, "Resume from trained model are not allowed! Because teacher model is initialized with ckpt in self.load_from. Resuming from ckpt will degrade your teacher performance in old Tasks."
             
-            # Update optimizer transforms based on null space projection
-            self.update_optim_transforms(self.train_dataloader)
+            # Update model transforms based on null space projection (computes eigens and transforms)
+            self.update_model_transforms(self.train_dataloader)
             
             # Load EWC importance weights from previous tasks
             self.load_importance()
@@ -625,13 +625,8 @@ class BRNullSpaceRunner(Runner):
         # ========== MODIFICATION END ==========
         return metrics
    
-    # ========== NEW METHOD: update_optim_transforms ==========
-    # Original Runner: Does not have this method
-    # Purpose: Updates optimizer with null space gradient projection transforms
-    # This computes the null space of previous tasks' feature covariance matrices
-    # and applies gradient projection during optimization to prevent catastrophic forgetting
     @torch.no_grad()
-    def update_optim_transforms(self, train_loader):
+    def update_model_transforms(self, train_loader):
         
         if is_model_wrapper(self.model):
             model = self.model.module
@@ -651,9 +646,9 @@ class BRNullSpaceRunner(Runner):
         self.fea_in = torch.load(self.fea_in_load_path, map_location=next(model.parameters()).device)
         self.fea_in = {k: v for k, v in self.fea_in.items() if not check_if_ignore(k)}
         
-        self.optim_wrapper.optimizer.get_eigens(self.fea_in)
-
-        self.optim_wrapper.optimizer.get_transforms(offset=self.offset)
+        # Call model's get_eigens method (directly matches model parameters with fea_in keys)
+        model.get_eigens(self.fea_in)
+        model.get_transforms(offset=self.offset)
         
         del self.fea_in
         

@@ -15,7 +15,8 @@ from .teacherrunner import TeacherRunner
 # from .ignore_all_nsrunner import IgnoreAllNullSpaceRunner
 
 from .nsrunner_roi_replay import BRNullSpaceRunner
+from .ewprrunner_roi_replay import EWPRRunner
 
 # from .nsrunner_roi_replay_vis import VisBRNullSpaceRunner
 # from .nsrunner_head import HeadNullSpaceRunner
-__all__ = ['BRNullSpaceRunner']
+__all__ = ['BRNullSpaceRunner', 'EWPRRunner']

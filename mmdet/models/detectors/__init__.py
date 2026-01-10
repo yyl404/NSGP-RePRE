@@ -60,6 +60,7 @@ from .yolof import YOLOF
 from .yolox import YOLOX
 
 from .faster_rcnn_roi_replay import FasterRCNNRoIReplay
+from .faster_rcnn_roi_replay_ewpr import FasterRCNNRoIReplayEWPR
 
 __all__ = [
     'ATSS', 'BaseDetector', 'SingleStageDetector', 'TwoStageDetector', 'RPN',
@@ -74,5 +75,5 @@ __all__ = [
     'RTMDet', 'Detectron2Wrapper', 'CrowdDet', 'CondInst', 'BoxInst',
     'DetectionTransformer', 'ConditionalDETR', 'DINO', 'DABDETR', 'GLIP',
     'DDQDETR', 'GroundingDINO',
-    'FasterRCNNBias', 'FasterRCNNNeck', 'FasterRCNNRoIReplay'
+    'FasterRCNNBias', 'FasterRCNNNeck', 'FasterRCNNRoIReplay', 'FasterRCNNRoIReplayEWPR'
 ]

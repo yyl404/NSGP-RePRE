@@ -1,8 +1,8 @@
-your_devices=2
+your_devices=1
 
 CFGS=(
-    cl_faster_rcnn_cfgs/incremental_task/cl_faster_rcnn_nsgp_repre_15_5_1.py
-    cl_faster_rcnn_cfgs/incremental_task/cl_faster_rcnn_nsgp_repre_15_5_2.py
+    # cl_faster_rcnn_cfgs_ewpr/incremental_task/cl_faster_rcnn_nsgp_repre_15_5_1.py
+    cl_faster_rcnn_cfgs_ewpr/incremental_task/cl_faster_rcnn_nsgp_repre_15_5_2.py
 )
 
 
