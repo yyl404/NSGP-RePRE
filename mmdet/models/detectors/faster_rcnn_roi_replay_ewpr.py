@@ -51,6 +51,8 @@ class FasterRCNNRoIReplayEWPR(TwoStageDetector):
         # Each layer can have different (a, b) parameters for sigmoid reshaping function
         # Automatically computed based on adaptive_threshold
         self.ewpr_params = defaultdict(dict)  # {layer_name: {'a': float, 'b': float}}
+        # EWPR loss weight for gradient computation (raw value will be used for logging)
+        self.ewpr_loss_weight = 500.
         # ========== MODIFICATION END ==========
 
 
@@ -156,9 +158,13 @@ class FasterRCNNRoIReplayEWPR(TwoStageDetector):
         # Compute EWPR loss if teacher model and eigenvectors are available
         # Use offset=0.0 by default (same as adaptive_threshold default)
         if hasattr(self, "teacher_model") and len(self.eigens) > 0:
-            ewpr_loss = self.compute_ewpr_loss(offset=0.0)
-            if ewpr_loss is not None:
-                losses['loss_ewpr'] = ewpr_loss
+            ewpr_loss_raw = self.compute_ewpr_loss(offset=0.0)
+            if ewpr_loss_raw is not None:
+                # Store weighted loss for gradient computation (used in backward pass)
+                losses['loss_ewpr'] = ewpr_loss_raw * self.ewpr_loss_weight
+                # Store raw loss for logging (not used in gradient computation)
+                # Note: Use non-'loss' prefix to avoid being included in gradient computation
+                losses['ewpr_loss_raw'] = ewpr_loss_raw
         # ========== MODIFICATION END ==========
         
         return losses
@@ -625,28 +631,17 @@ class FasterRCNNRoIReplayEWPR(TwoStageDetector):
         total_loss = 0.0
         num_layers = 0
         
-        # Get current model state dict
-        current_state_dict = self.state_dict()
+        # Get teacher model state dict (teacher weights don't need gradients)
         teacher_state_dict = self.teacher_model.state_dict()
         
         # Iterate through all layers that have eigenvectors computed
         for layer_name in self.eigens.keys():
-            # Check if layer exists in both current and teacher models
-            if layer_name not in current_state_dict or layer_name not in teacher_state_dict:
-                continue
-            
-            current_weight = current_state_dict[layer_name]
-            teacher_weight = teacher_state_dict[layer_name]
-            
-            # Skip if shapes don't match
-            if current_weight.shape != teacher_weight.shape:
-                continue
-            
             # Skip if not a weight parameter (bias, etc.)
             if not layer_name.endswith('.weight'):
                 continue
             
             # Get the corresponding module to determine layer type
+            # We need to get the module first to access its weight parameter directly (with gradients)
             layer_module = None
             for name, module in self.named_modules():
                 if name + '.weight' == layer_name:
@@ -660,9 +655,27 @@ class FasterRCNNRoIReplayEWPR(TwoStageDetector):
             if not isinstance(layer_module, (torch.nn.Linear, torch.nn.Conv2d)):
                 continue
             
+            # Get current weight directly from module (this preserves gradients!)
+            # IMPORTANT: Use layer_module.weight instead of state_dict() to maintain gradient flow
+            current_weight = layer_module.weight
+            
+            # Check if teacher weight exists
+            if layer_name not in teacher_state_dict:
+                continue
+            
+            teacher_weight = teacher_state_dict[layer_name]
+            
+            # Skip if shapes don't match
+            if current_weight.shape != teacher_weight.shape:
+                continue
+            
+            # Move teacher_weight to same device and dtype as current_weight
+            teacher_weight = teacher_weight.to(current_weight.device).to(current_weight.dtype)
+            
             # Get eigenvectors and eigenvalues for this layer
-            eigen_vectors = self.eigens[layer_name]['eigen_vector']  # Shape: (C, C)
-            eigen_values = self.eigens[layer_name]['eigen_value']    # Shape: (C,)
+            # IMPORTANT: Move to same device as current_weight to ensure proper computation
+            eigen_vectors = self.eigens[layer_name]['eigen_vector'].to(current_weight.device)  # Shape: (C, C)
+            eigen_values = self.eigens[layer_name]['eigen_value'].to(current_weight.device)    # Shape: (C,)
             
             # Compute or get sigmoid parameters (a, b) for this layer
             if layer_name not in self.ewpr_params:
@@ -672,6 +685,8 @@ class FasterRCNNRoIReplayEWPR(TwoStageDetector):
             b = self.ewpr_params[layer_name]['b']
             
             # Compute weight difference: ΔW = W_current - W_teacher
+            # Note: current_weight has gradients, teacher_weight is detached (from state_dict)
+            # This ensures gradients flow back to current_weight only
             weight_diff = current_weight - teacher_weight
             
             # Handle different layer types
@@ -712,9 +727,12 @@ class FasterRCNNRoIReplayEWPR(TwoStageDetector):
             
             # Transform eigenvalues using sigmoid: scale = sigmoid(a * log_2(λ) + b)
             # Add small epsilon to avoid log(0)
+            # Convert a and b to tensors on the same device to ensure gradient flow
             eps = 1e-8
             log2_eigen_values = torch.log2(eigen_values + eps)
-            sigmoid_input = a * log2_eigen_values + b
+            a_tensor = torch.tensor(a, device=current_weight.device, dtype=current_weight.dtype)
+            b_tensor = torch.tensor(b, device=current_weight.device, dtype=current_weight.dtype)
+            sigmoid_input = a_tensor * log2_eigen_values + b_tensor
             scales = torch.sigmoid(sigmoid_input)  # Shape: (C,)
             
             # Scale projections by transformed eigenvalues

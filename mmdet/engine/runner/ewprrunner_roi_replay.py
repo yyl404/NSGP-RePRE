@@ -935,6 +935,11 @@ class EWPRRunner(Runner):
             # print([i.gt_instances.labels.unique() for i in data["data_samples"]])
             losses = self.model._run_forward(data, mode='loss')  # type: ignore
             parsed_losses, log_vars = model.parse_losses(losses)
+            # ========== MODIFICATION START: Replace weighted EWPR loss with raw value for logging ==========
+            # Replace loss_ewpr (weighted) with ewpr_loss_raw (original) in log_vars for display
+            # This ensures gradient computation uses weighted loss, but log shows original value
+            if 'loss_ewpr' in log_vars and 'ewpr_loss_raw' in losses:
+                log_vars['loss_ewpr'] = losses['ewpr_loss_raw'].detach()
             # ========== MODIFICATION END ==========
             loss = self.optim_wrapper.scale_loss(parsed_losses)
             self.optim_wrapper.backward(loss)
