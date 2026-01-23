@@ -1,7 +1,7 @@
 _base_ = [
     '../_base_/models/faster-rcnn_r50_fpn.py',
     f'../_base_/datasets/coco_detection_70_10_task1.py',
-    '../_base_/schedules/schedule_1x_sgdnscl.py', '../_base_/brnsrunetime.py'
+    '../_base_/schedules/schedule_1x_sgd.py', '../_base_/ewprrunetime.py'
 ]
 
 # ====================================================================
@@ -17,16 +17,18 @@ train_task_split = [0, 70, 80]
 offset = 0.0
 ignore_keys = ["rpn", "roi_head"]
 # previous_dir = f'./work_dirs/ns3_split_id/cl_faster_rcnn_ns3_split_id_5_5_{task_id-1}'
-previous_dir = f'./work_dirs/coco_template/faster-rcnn_r50_fpn_1x_coco_70_10_base' + "none"
-work_dir = f'./work_dirs/coco_template/faster-rcnn_r50_fpn_1x_coco_70_10_base'
-load_from = work_dir + "/best_epoch_12.pth"
-resume=True
+# For task_id=1, previous_dir is not used (first task has no previous task)
+previous_dir = None
+work_dir = f'./work_dirs/coco_template/cl_faster_rcnn_ns3_split_id_70_10_{task_id}'
+# For task_id=1 (first task), start training from scratch, only use backbone pretrained weights
+load_from = None
+resume = True  # Resume training from the latest checkpoint (epoch_22 or epoch_23)
 ns_thresh = 0.0
 ns_init = False
 rr_thresh = [0.5, 0.7]
 # model settings
 model = dict(
-    type='FasterRCNNRoIReplay',
+    type='FasterRCNNRoIReplayEWPR',
     data_preprocessor=dict(
         type='DetDataPreprocessor',
         mean=[123.675, 116.28, 103.53],
@@ -42,7 +44,7 @@ model = dict(
         norm_cfg=dict(type='BN', requires_grad=True),
         norm_eval=True,
         style='pytorch',
-        init_cfg=dict(type='Pretrained', checkpoint="pretrained/resnet50-0676ba61.pth")),
+        init_cfg=dict(type='Pretrained', checkpoint="/data3/code/fzc/code1/NSGP-RePRE/imagenet_pretrained_backbone.pth")),
     neck=dict(
         type='FPN',
         in_channels=[256, 512, 1024, 2048],
@@ -144,3 +146,6 @@ model = dict(
         # e.g., nms=dict(type='soft_nms', iou_threshold=0.5, min_score=0.05)
     ))
 
+# Override save_best to use bbox_mAP instead of auto-selected metric
+default_hooks = dict(
+    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=1, save_best='coco/bbox_mAP', rule='greater'))

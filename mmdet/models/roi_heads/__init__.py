@@ -24,7 +24,12 @@ from .sparse_roi_head import SparseRoIHead
 from .standard_roi_head import StandardRoIHead
 from .trident_roi_head import TridentRoIHead
 
-from .standard_roi_replay_head import StandardRoIReplayHead
+from .standard_roi_replay_head import (
+    StandardRoIReplayHead,
+    StandardPrototypeReplayHead,
+    StandardMultiPrototypeReplayHead,
+    StandardMultiPrototypeDistillHead
+)
 
 __all__ = [
     'BaseRoIHead', 'CascadeRoIHead', 'DoubleHeadRoIHead', 'MaskScoringRoIHead',
@@ -37,5 +42,6 @@ __all__ = [
     'CoarseMaskHead', 'DynamicRoIHead', 'SparseRoIHead', 'TridentRoIHead',
     'SCNetRoIHead', 'SCNetMaskHead', 'SCNetSemanticHead', 'SCNetBBoxHead',
     'FeatureRelayHead', 'GlobalContextHead', 'MultiInstanceRoIHead',
-    'StandardRoIReplayHead'
+    'StandardRoIReplayHead', 'StandardPrototypeReplayHead',
+    'StandardMultiPrototypeReplayHead', 'StandardMultiPrototypeDistillHead'
 ]

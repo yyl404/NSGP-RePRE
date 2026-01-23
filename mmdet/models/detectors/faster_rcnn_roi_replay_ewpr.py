@@ -32,7 +32,8 @@ class FasterRCNNRoIReplayEWPR(TwoStageDetector):
                  test_cfg: ConfigType,
                  neck: OptConfigType = None,
                  data_preprocessor: OptConfigType = None,
-                 init_cfg: OptMultiConfig = None) -> None:
+                 init_cfg: OptMultiConfig = None,
+                 ewpr_loss_weight: float=10.0) -> None:
         super().__init__(
             backbone=backbone,
             neck=neck,
@@ -52,7 +53,7 @@ class FasterRCNNRoIReplayEWPR(TwoStageDetector):
         # Automatically computed based on adaptive_threshold
         self.ewpr_params = defaultdict(dict)  # {layer_name: {'a': float, 'b': float}}
         # EWPR loss weight for gradient computation (raw value will be used for logging)
-        self.ewpr_loss_weight = 500.
+        self.ewpr_loss_weight = ewpr_loss_weight
         # ========== MODIFICATION END ==========
 
 
@@ -475,370 +476,112 @@ class FasterRCNNRoIReplayEWPR(TwoStageDetector):
         zero_idx = torch.as_tensor(torch.from_numpy(zero_idx), dtype=torch.bool, device=svals.device)
         return zero_idx
 
-    def compute_ewpr_sigmoid_params(self, layer_name: str, eigen_values: torch.Tensor, offset: float = 0.0):
-        """Automatically compute sigmoid reshaping function parameters (a, b) for EWPR.
-        
-        The sigmoid reshaping function is: y = sigmoid(a * log_2(x) + b)
-        Goal: 
-        - Important space directions (large eigenvalues) should get scale > 0.5
-        - Null space directions (small eigenvalues) should get scale < 0.5
-        - Smooth transition zone at the boundary
-        
-        Args:
-            layer_name (str): Name of the layer
-            eigen_values (torch.Tensor): Eigenvalues in descending order, shape (C,)
-            offset (float): Offset for adaptive threshold (same as used in adaptive_threshold)
-        
-        Returns:
-            tuple: (a, b) parameters for sigmoid reshaping function
-        """
-        # Use adaptive_threshold to find the boundary between important and null space
-        # adaptive_threshold returns a boolean mask where:
-        # - True (1) for indices >= i_thres: null space (small eigenvalues)
-        # - False (0) for indices < i_thres: important space (large eigenvalues)
-        zero_idx = self.adaptive_threshold(eigen_values, offset=offset)
-        # Find the first True index (first null space index)
-        null_space_indices = zero_idx.nonzero(as_tuple=False)
-        
-        if len(null_space_indices) == 0:
-            # All are important space, set threshold at the end
-            i_thres_idx = len(eigen_values) - 1
-        else:
-            # i_thres_idx is the first null space index (boundary point)
-            i_thres_idx = null_space_indices[0].item()
-        
-        # Get eigenvalue at the threshold
-        if i_thres_idx < len(eigen_values):
-            lambda_thres = eigen_values[i_thres_idx].item()
-        else:
-            lambda_thres = eigen_values[-1].item()
-        
-        # We want sigmoid(a * log_2(lambda_thres) + b) = 0.5 at the threshold
-        # This means: a * log_2(lambda_thres) + b = 0
-        # So: b = -a * log_2(lambda_thres)
-        
-        # To determine 'a', we set constraints:
-        # - For eigenvalues larger than threshold (important space), we want sigmoid > 0.5
-        # - For eigenvalues smaller than threshold (null space), we want sigmoid < 0.5
-        # - We want a smooth transition around the threshold
-        
-        # Strategy: Set 'a' such that the transition is smooth
-        # Choose 'a' to control the steepness of the transition
-        # A larger 'a' makes the transition sharper, smaller 'a' makes it smoother
-        
-        # Select two points around the threshold for calibration:
-        # Point 1: important space (before threshold), should give sigmoid ~ 0.7-0.9
-        # Point 2: null space (after threshold), should give sigmoid ~ 0.1-0.3
-        
-        if i_thres_idx > 0 and i_thres_idx < len(eigen_values) - 1:
-            # Get eigenvalues at transition points
-            # Important space point (at 1/3 of the way from start to threshold)
-            idx_important = max(0, i_thres_idx // 3)
-            lambda_important = eigen_values[idx_important].item()
-            
-            # Null space point (at 2/3 of the way from threshold to end)
-            idx_null = min(len(eigen_values) - 1, i_thres_idx + (len(eigen_values) - i_thres_idx) * 2 // 3)
-            lambda_null = eigen_values[idx_null].item()
-            
-            # We want:
-            # sigmoid(a * log_2(lambda_important) + b) ≈ 0.8 (important space)
-            # sigmoid(a * log_2(lambda_null) + b) ≈ 0.2 (null space)
-            # sigmoid(a * log_2(lambda_thres) + b) = 0.5 (threshold)
-            
-            # Using inverse sigmoid: inv_sigmoid(y) = log(y / (1 - y))
-            # For y = 0.8: inv_sigmoid(0.8) ≈ 1.386
-            # For y = 0.2: inv_sigmoid(0.2) ≈ -1.386
-            # For y = 0.5: inv_sigmoid(0.5) = 0
-            
-            # From: a * log_2(lambda_thres) + b = 0
-            # We get: b = -a * log_2(lambda_thres)
-            
-            # For important point: a * log_2(lambda_important) + b = 1.386
-            # Substituting b: a * log_2(lambda_important) - a * log_2(lambda_thres) = 1.386
-            # a * (log_2(lambda_important) - log_2(lambda_thres)) = 1.386
-            # a * log_2(lambda_important / lambda_thres) = 1.386
-            
-            log2_important_thres = np.log2(lambda_important + 1e-8) - np.log2(lambda_thres + 1e-8)
-            if abs(log2_important_thres) > 1e-6:
-                a_important = 1.386 / log2_important_thres
-            else:
-                a_important = 5.0  # Default if values too close
-            
-            # For null point: a * log_2(lambda_null) + b = -1.386
-            # a * log_2(lambda_null) - a * log_2(lambda_thres) = -1.386
-            # a * log_2(lambda_null / lambda_thres) = -1.386
-            log2_null_thres = np.log2(lambda_null + 1e-8) - np.log2(lambda_thres + 1e-8)
-            if abs(log2_null_thres) > 1e-6:
-                a_null = -1.386 / log2_null_thres
-            else:
-                a_null = 5.0  # Default if values too close
-            
-            # Take average or use the one that gives better separation
-            # Use the smaller absolute value to ensure smooth transition
-            a = (abs(a_important) + abs(a_null)) / 2.0
-            # Ensure 'a' is positive for monotonic behavior
-            a = abs(a)
-        else:
-            # Fallback: use a default value
-            a = 5.0
-        
-        # Compute b from the constraint: b = -a * log_2(lambda_thres)
-        log2_thres = np.log2(lambda_thres + 1e-8)
-        b = -a * log2_thres
-        
-        # Store parameters for this layer
-        self.ewpr_params[layer_name] = {'a': a, 'b': b}
-        
-        return a, b
-
     def compute_ewpr_loss(self, offset: float = 0.0) -> torch.Tensor:
-        """Compute Eigen Weighted Projection Regularization (EWPR) Loss.
-        
-        EWPR loss encourages the model to update weights in the null space direction
-        while preserving important directions learned in previous tasks. The loss is
-        computed by:
-        1. Computing weight differences between current and teacher model
-        2. Projecting differences onto PCA principal component directions (eigenvectors)
-        3. Scaling projections using eigenvalues transformed by sigmoid function
-        4. Summing scaled projections and computing the norm as loss
-        
-        Mathematical Formulation:
-        --------
-        For each layer l:
-            ΔW_l = W_l - W_l^teacher  (weight difference)
-            
-        Project onto eigenvectors (principal components):
-            proj_i = ΔW_l · V_i  (projection onto i-th eigenvector)
-            
-        Transform eigenvalues using sigmoid:
-            scale_i = sigmoid(a * log_2(λ_i) + b)
-            
-        Scale and sum projections:
-            scaled_proj = Σ_i (scale_i * proj_i * V_i)
-            
-        Loss:
-            L_ewpr = ||scaled_proj||
-        
-        Args:
-            offset (float): Offset for adaptive threshold when computing sigmoid parameters
-        
-        Returns:
-            torch.Tensor: EWPR loss value, or None if conditions not met
+        """Compute EWPR loss following the logic in ultralytics/ultralytics/engine/ewpr.py.
+
+        For each layer with precomputed eigen decomposition:
+        1) Flatten weight difference (W_current - W_teacher) to (out_dim, C)
+        2) Project onto PCA components: proj = ΔW @ V      -> (out_dim, C)
+        3) Scale by eigen values (adjusted): scaled = proj * adjusted_eigen_values
+        4) Loss = mean( ||scaled||_2 ) over output dimension, multiplied by a factor (100)
+        The final loss is averaged across all processed layers.
         """
         if not hasattr(self, "teacher_model") or len(self.eigens) == 0:
             return None
-        
+
         total_loss = 0.0
         num_layers = 0
-        
-        # Get teacher model state dict (teacher weights don't need gradients)
+
         teacher_state_dict = self.teacher_model.state_dict()
-        
-        # Iterate through all layers that have eigenvectors computed
+
         for layer_name in self.eigens.keys():
-            # Skip if not a weight parameter (bias, etc.)
             if not layer_name.endswith('.weight'):
                 continue
-            
-            # Get the corresponding module to determine layer type
-            # We need to get the module first to access its weight parameter directly (with gradients)
+
+            # Find corresponding module to keep gradients
             layer_module = None
             for name, module in self.named_modules():
                 if name + '.weight' == layer_name:
                     layer_module = module
                     break
-            
             if layer_module is None:
                 continue
-            
-            # Only process Linear and Conv2d layers
             if not isinstance(layer_module, (torch.nn.Linear, torch.nn.Conv2d)):
                 continue
-            
-            # Get current weight directly from module (this preserves gradients!)
-            # IMPORTANT: Use layer_module.weight instead of state_dict() to maintain gradient flow
+
+            # Current weights with grads
             current_weight = layer_module.weight
-            
-            # Check if teacher weight exists
+            # Teacher weights (no grads)
             if layer_name not in teacher_state_dict:
+                print_log(f"[EWPR] Skip layer '{layer_name}': not in teacher_state_dict", logger='current')
                 continue
-            
             teacher_weight = teacher_state_dict[layer_name]
-            
-            # Skip if shapes don't match
             if current_weight.shape != teacher_weight.shape:
+                print_log(f"[EWPR] Skip layer '{layer_name}': shape mismatch current {tuple(current_weight.shape)} vs teacher {tuple(teacher_weight.shape)}", logger='current')
                 continue
-            
-            # Move teacher_weight to same device and dtype as current_weight
             teacher_weight = teacher_weight.to(current_weight.device).to(current_weight.dtype)
-            
-            # Get eigenvectors and eigenvalues for this layer
-            # IMPORTANT: Move to same device as current_weight to ensure proper computation
-            eigen_vectors = self.eigens[layer_name]['eigen_vector'].to(current_weight.device)  # Shape: (C, C)
-            eigen_values = self.eigens[layer_name]['eigen_value'].to(current_weight.device)    # Shape: (C,)
-            
-            # Compute or get sigmoid parameters (a, b) for this layer
-            if layer_name not in self.ewpr_params:
-                self.compute_ewpr_sigmoid_params(layer_name, eigen_values, offset=offset)
-            
-            a = self.ewpr_params[layer_name]['a']
-            b = self.ewpr_params[layer_name]['b']
-            
-            # Compute weight difference: ΔW = W_current - W_teacher
-            # Note: current_weight has gradients, teacher_weight is detached (from state_dict)
-            # This ensures gradients flow back to current_weight only
+
+            # Eigen components
+            eigen_vectors = self.eigens[layer_name]['eigen_vector'].to(current_weight.device)
+            eigen_values = self.eigens[layer_name]['eigen_value'].to(current_weight.device)
+
+            # Adjust eigen values following ultralytics' logic:
+            # 1) Find elbow point using adaptive_threshold
+            # 2) Normalize elbow value to 1.0
+            # 3) Values before/at elbow -> 1.0, after elbow -> scaled by same factor
+            def _adjust_eigen_values(vals: torch.Tensor) -> torch.Tensor:
+                # vals: 1D tensor (C,)
+                # Use adaptive_threshold to find elbow point (returns boolean mask)
+                # The first True position in the mask is the elbow point index
+                preserve_mask = self.adaptive_threshold(vals, offset=0.0)
+                # Find the first index where mask is True (elbow point)
+                elbow_idx = torch.nonzero(preserve_mask, as_tuple=False)
+                if elbow_idx.numel() > 0:
+                    elbow_idx = elbow_idx[0, 0].item()
+                else:
+                    # If no True found, use the last index
+                    elbow_idx = vals.shape[0] - 1
+                
+                elbow_idx = max(0, min(elbow_idx, vals.shape[0] - 1))
+                elbow_val = vals[elbow_idx]
+                eps = 1e-8
+                scale_factor = 1.0 / (elbow_val + eps)
+                adjusted = torch.ones_like(vals)
+                if elbow_idx + 1 < vals.shape[0]:
+                    adjusted[elbow_idx + 1:] = vals[elbow_idx + 1:] * scale_factor
+                return adjusted
+
+            adjusted_eigen_values = _adjust_eigen_values(eigen_values)
+
+            # ΔW
             weight_diff = current_weight - teacher_weight
-            
-            # Handle different layer types
+
+            # Flatten to (out_dim, C)
             if isinstance(layer_module, torch.nn.Linear):
-                # Linear layer: weight shape (out_features, in_features)
-                # Eigenvectors shape: (in_features, in_features) - based on input feature covariance
-                weight_diff_flat = weight_diff  # Already 2D: (out_features, in_features)
-                
-                # Project each output feature's weight difference onto principal components
-                # proj = (ΔW) @ V, Shape: (out_features, num_components)
-                if weight_diff_flat.shape[1] != eigen_vectors.shape[0]:
-                    continue  # Dimension mismatch
-                
-                projections = torch.matmul(weight_diff_flat, eigen_vectors)  # (out_features, C)
-                
-            elif isinstance(layer_module, torch.nn.Conv2d):
-                # Conv2d layer: weight shape (out_channels, in_channels, H, W)
-                # Eigenvectors shape: (C, C) where C = kernel_size[0] * kernel_size[1] * in_channels
-                # Based on input patch covariance (unfolded patches)
-                kernel_size = layer_module.kernel_size
-                in_channels = layer_module.in_channels
-                expected_eigen_dim = kernel_size[0] * kernel_size[1] * in_channels
-                
+                weight_diff_flat = weight_diff  # (out_features, in_features)
+            else:  # Conv2d
+                expected_eigen_dim = layer_module.kernel_size[0] * layer_module.kernel_size[1] * layer_module.in_channels
                 if eigen_vectors.shape[0] != expected_eigen_dim:
-                    continue  # Dimension mismatch
-                
-                # Reshape weight difference: (out_channels, in_channels, H, W) -> (out_channels, in_channels*H*W)
-                weight_diff_flat = weight_diff.view(weight_diff.shape[0], -1)  # (out_channels, in_channels*H*W)
-                
-                # Project each output channel's weight difference onto principal components
-                # proj = (ΔW) @ V, Shape: (out_channels, num_components)
-                if weight_diff_flat.shape[1] != expected_eigen_dim:
+                    print_log(f"[EWPR] Skip layer '{layer_name}': eigen dim {eigen_vectors.shape[0]} != expected {expected_eigen_dim}", logger='current')
                     continue
-                
-                projections = torch.matmul(weight_diff_flat, eigen_vectors)  # (out_channels, C)
-            else:
-                continue  # Skip unsupported layer types
-            
-            # Transform eigenvalues using sigmoid: scale = sigmoid(a * log_2(λ) + b)
-            # Add small epsilon to avoid log(0)
-            # Convert a and b to tensors on the same device to ensure gradient flow
-            eps = 1e-8
-            log2_eigen_values = torch.log2(eigen_values + eps)
-            a_tensor = torch.tensor(a, device=current_weight.device, dtype=current_weight.dtype)
-            b_tensor = torch.tensor(b, device=current_weight.device, dtype=current_weight.dtype)
-            sigmoid_input = a_tensor * log2_eigen_values + b_tensor
-            scales = torch.sigmoid(sigmoid_input)  # Shape: (C,)
-            
-            # Scale projections by transformed eigenvalues
-            # Expand scales to match projection dimensions: (1, C) for broadcasting
-            scales_expanded = scales.unsqueeze(0)  # (1, C)
-            scaled_projections = projections * scales_expanded  # (out_features/channels, C)
-            
-            # Project back to original space and sum
-            # scaled_proj_original = (scaled_projections) @ V^T
-            scaled_proj_original = torch.matmul(scaled_projections, eigen_vectors.t())  # (out_features/channels, original_dim)
-            
-            # Compute norm of the scaled projection vector as loss for this layer
-            # Use Frobenius norm (same as L2 for matrices)
-            layer_loss = torch.norm(scaled_proj_original, p='fro')
-            total_loss = total_loss + layer_loss
+                weight_diff_flat = weight_diff.view(weight_diff.shape[0], -1)  # (out_channels, C)
+
+            # Dimension check
+            if weight_diff_flat.shape[1] != eigen_vectors.shape[0]:
+                print_log(f"[EWPR] Skip layer '{layer_name}': projection dim mismatch {weight_diff_flat.shape[1]} vs {eigen_vectors.shape[0]}", logger='current')
+                continue
+
+            # 1) Project
+            projections = torch.matmul(weight_diff_flat, eigen_vectors)  # (out_dim, C)
+            # 2) Scale (broadcast eigen values)
+            scaled = projections * adjusted_eigen_values.unsqueeze(0)  # (out_dim, C)
+            # 3) Norm per output, mean, scale factor 100 (match ultralytics implementation)
+            layer_loss = 100.0 * scaled.norm(dim=1).mean()
+
+            total_loss += layer_loss
             num_layers += 1
-        
-        # Return average loss across all layers (or total if preferred)
+
         if num_layers == 0:
             return None
-        
-        return total_loss / num_layers  # Average loss across all processed layers
 
-    def get_transforms(self, offset=0.0):
-        """Compute null space projection transforms for gradient updates.
-        
-        This function implements the core of NSGP (Null Space Gradient Projection).
-        It computes projection matrices that map gradients to the null space of
-        previous tasks' feature covariance, preventing catastrophic forgetting.
-        
-        Args:
-            offset (float): Adjustment factor for adaptive thresholding.
-                Positive offset: reserve more basis vectors (more conservative)
-                Negative offset: reserve fewer basis vectors (more aggressive)
-                Range: [-1, 1]
-        """
-        # Iterate through all parameters that have eigenvalues computed
-        for name in self.eigens.keys():
-            if name not in self.eigens:
-                print_log(f"missing keys: {name}")
-                continue
-            
-            # Adaptive threshold: finds the "elbow" in singular value spectrum
-            # Returns boolean mask: True for important singular values to preserve
-            ind = self.adaptive_threshold(self.eigens[name]['eigen_value'], offset=offset)
-            
-            # Log statistics about reserved basis
-            print_log('{}: reserving basis {}/{}; cond: {}, radio:{}'.format(
-                name,
-                ind.sum(), self.eigens[name]['eigen_value'].shape[0],  # How many basis preserved
-                self.eigens[name]['eigen_value'][0] /
-                self.eigens[name]['eigen_value'][ind][0] if ind.sum() > 0 else 0.0,  # Condition number
-                self.eigens[name]['eigen_value'][ind].sum(
-                ) / self.eigens[name]['eigen_value'].sum()  # Energy ratio preserved
-            ))
-            
-            # Construct projection matrix P = VV^T
-            # Step 1: Extract columns of V corresponding to important singular values
-            # basis shape: (feature_dim, num_preserved_basis)
-            basis = self.eigens[name]['eigen_vector'][:, ind]
-            
-            # Step 2: Compute projection matrix: P = VV^T
-            # transform shape: (feature_dim, feature_dim)
-            # This projects any vector onto the span of preserved basis vectors
-            transform = torch.mm(basis, basis.transpose(1, 0))
-            
-            # Normalize backbone transforms to prevent numerical issues
-            # (backbone layers have larger feature dimensions)
-            if 'backbone' in name:
-                self.transforms[name] = transform / torch.norm(transform)
-            else:
-                self.transforms[name] = transform
-            
-            # Detach to prevent gradients flowing through transform computation
-            self.transforms[name].detach_()
-    
-    def plot_sval_figures(self, svals_dict, distinguisher=None, offset=0.0):
-        """Plot singular value spectra for visualization/debugging.
-        
-        Args:
-            svals_dict (dict): Dictionary containing eigenvalues for each layer
-            distinguisher (str, optional): Identifier for saving the figure
-            offset (float): Offset for adaptive threshold visualization
-        """
-        try:
-            import matplotlib.pyplot as plt
-            
-            plt.close()
-            
-            svals_dict_ary = {k: v['eigen_value'].cpu().numpy() for k, v in svals_dict.items()}
-            
-            fig, ax_list = plt.subplots(len(svals_dict_ary.keys())//4+1, 4)
-            fig.set_figheight(60)
-            fig.set_figwidth(15)
-            for i, k in enumerate(svals_dict_ary.keys()):
-                zero_idx = self.adaptive_threshold(svals_dict[k]['eigen_value'], offset=offset).cpu().numpy()
-                points: np.ndarray = svals_dict_ary[k]
-                i_thres = np.arange(len(points))[zero_idx].min()
-
-                ax_list[i // 4, i % 4].plot(np.arange(i_thres + 1), points[:i_thres + 1], color='blue')
-                ax_list[i // 4, i % 4].plot(np.arange(i_thres, len(points)), points[i_thres:], color='red')
-                ax_list[i // 4, i % 4].set_title(k)
-            if not osp.exists(save_dir := osp.join('./', 'figures')):
-                os.mkdir(save_dir)
-            fig.tight_layout()
-            fig.savefig(osp.join(save_dir, save_name := f"svals_task{1}_{distinguisher}.png"))
-            plt.close()
-        except ImportError:
-            print_log("matplotlib not available, skipping plot_sval_figures", level='WARNING')
+        return total_loss / num_layers

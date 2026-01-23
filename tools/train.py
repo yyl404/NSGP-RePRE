@@ -81,7 +81,9 @@ def main():
         # use config filename as default work_dir if cfg.work_dir is None
         work_dir_abs_path = osp.abspath(args.config)
         work_dir_mid = work_dir_abs_path.split("/")[-2]
-        cfg.work_dir = osp.join('/home/Newdisk1/wuqirui/work_dirs', work_dir_mid,
+        # Use project root instead of hardcoded path
+        project_root = osp.dirname(osp.dirname(osp.abspath(__file__)))
+        cfg.work_dir = osp.join(project_root, 'work_dirs', work_dir_mid,
                                 osp.splitext(osp.basename(args.config))[0])
 
     # enable automatic-mixed-precision training

@@ -25,6 +25,7 @@ rr_thresh = [0.5, 0.7]
 # model settings
 model = dict(
     type='FasterRCNNRoIReplayEWPR',
+    ewpr_loss_weight=10.0,
     data_preprocessor=dict(
         type='DetDataPreprocessor',
         mean=[123.675, 116.28, 103.53],

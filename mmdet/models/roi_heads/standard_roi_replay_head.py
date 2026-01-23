@@ -499,5 +499,67 @@ class StandardMultiPrototypeReplayHead(StandardRoIReplayHead):
         losses["replay_loss_cls"] = F.cross_entropy(cls_score.softmax(dim=-1), self.tmp_label.to(cls_score.device))
         bbox_results.update(replay_loss=losses)
         return bbox_results
+
+
+@MODELS.register_module()
+class StandardMultiPrototypeDistillHead(StandardMultiPrototypeReplayHead):
+    """StandardMultiPrototypeDistillHead with distillation support.
+    
+    This class extends StandardMultiPrototypeReplayHead to support knowledge
+    distillation from a teacher model.
+    """
+    def __init__(self,
+                 bbox_roi_extractor: OptMultiConfig = None,
+                 bbox_head: OptMultiConfig = None,
+                 mask_roi_extractor: OptMultiConfig = None,
+                 mask_head: OptMultiConfig = None,
+                 shared_head: OptConfigType = None,
+                 train_cfg: OptConfigType = None,
+                 test_cfg: OptConfigType = None,
+                 init_cfg: OptMultiConfig = None,
+                 previous_path = None,
+                 task_id = 1,
+                 task_split = [0,10,20],
+                 max_prototype=10,
+                 work_dir = None) -> None:
+        super().__init__(bbox_roi_extractor, bbox_head, mask_roi_extractor, 
+                        mask_head, shared_head, train_cfg, test_cfg, init_cfg,
+                        previous_path, task_id, task_split, max_prototype, work_dir)
+    
+    def replay_loss(self, bbox_feats: Tuple[Tensor],
+                  sampling_results: List[SamplingResult],
+                  rois) -> dict:
+        """Perform forward propagation and loss calculation with distillation.
+
+        Args:
+            x (tuple[Tensor]): List of multi-level img features.
+            sampling_results (list["obj:`SamplingResult`]): Sampling results.
+
+        Returns:
+            dict[str, Tensor]: Usually returns a dictionary with keys:
+
+                - `cls_score` (Tensor): Classification scores.
+                - `bbox_pred` (Tensor): Box energies / deltas.
+                - `bbox_feats` (Tensor): Extract bbox RoI features.
+                - `loss_bbox` (dict): A dictionary of bbox loss components.
+        """
+        bbox_feats = bbox_feats
+        if self.with_shared_head:
+            bbox_feats = self.shared_head(bbox_feats)
+        cls_score, bbox_pred = self.bbox_head(bbox_feats)
+
+        bbox_results = dict(
+            cls_score=cls_score, bbox_pred=bbox_pred, bbox_feats=bbox_feats)
+
+        losses = dict()
+ 
+        pre_idx = self.task_split[self.task_id]
+        cls_score = torch.cat([cls_score[:, :pre_idx], cls_score[:,-1:]], dim=-1)
+        
+        # Use cross-entropy loss with prototype labels (same as ReplayHead)
+        losses["replay_loss_cls"] = F.cross_entropy(cls_score.softmax(dim=-1), self.tmp_label.to(cls_score.device))
+        
+        bbox_results.update(replay_loss=losses)
+        return bbox_results
     
     

@@ -1,10 +1,29 @@
 your_devices=1
 
-CFGS=(
+# CFGsS=(
     # cl_faster_rcnn_cfgs_ewpr/incremental_task/cl_faster_rcnn_nsgp_repre_15_5_1.py
-    cl_faster_rcnn_cfgs_ewpr/incremental_task/cl_faster_rcnn_nsgp_repre_15_5_2.py
+    # cl_faster_rcnn_cfgs_ewpr/incremental_task/cl_faster_rcnn_nsgp_repre_15_5_2.py
+# )
+
+CFGS=(
+#     cl_faster_rcnn_cfgs_ewpr/incremental_task/cl_faster_rcnn_nsgp_repre_10_10_1.py
+    cl_faster_rcnn_cfgs_ewpr/incremental_task/cl_faster_rcnn_nsgp_repre_10_10_2.py
 )
 
+# CFGS=(
+#     cl_faster_rcnn_cfgs_ewpr/incremental_task/cl_faster_rcnn_nsgp_repre_19_1_1.py
+#     cl_faster_rcnn_cfgs_ewpr/incremental_task/cl_faster_rcnn_nsgp_repre_19_1_2.py
+# )
+
+# CFGS=(
+    # cl_faster_rcnn_cfgs_ewpr/cl_coco/cl_faster_rcnn_ns3_split_id_40_40_1.py
+    # cl_faster_rcnn_cfgs_ewpr/cl_coco/cl_faster_rcnn_ns3_split_id_40_40_2.py
+# )
+
+# CFGS=(
+#     cl_faster_rcnn_cfgs_ewpr/cl_coco/cl_faster_rcnn_ns3_split_id_70_10_1.py
+#     cl_faster_rcnn_cfgs_ewpr/cl_coco/cl_faster_rcnn_ns3_split_id_70_10_2.py
+# )
 
 for CFG in "${CFGS[@]}"
 do 

@@ -150,7 +150,45 @@ class EWPRRunner(Runner):
         # ========== MODIFICATION END ==========
         cfg: Optional[ConfigType] = None,
     ):
-        self._work_dir = osp.abspath(work_dir)
+        # Fix: Ensure work_dir is resolved relative to project root, not current working directory
+        # This prevents issues when CWD is changed to a different location (e.g., /home/Newdisk1/...)
+        # Also handle cases where work_dir is an absolute path pointing to Newdisk1 (from hardcoded paths)
+        current_file_dir = osp.dirname(osp.abspath(__file__))
+        project_root = osp.dirname(osp.dirname(osp.dirname(current_file_dir)))
+        
+        if not osp.isabs(work_dir):
+            # If work_dir is relative, resolve it relative to the project root
+            # Remove './' prefix if present
+            rel_path = work_dir.lstrip('./') if work_dir.startswith('./') else work_dir
+            self._work_dir = osp.join(project_root, rel_path)
+        elif 'Newdisk1' in work_dir or 'Newdisk' in work_dir:
+            # If work_dir is an absolute path but points to Newdisk1/Newdisk (hardcoded path),
+            # reconstruct it relative to project root
+            # Extract the relative part from the hardcoded path
+            # e.g., /home/Newdisk1/wuqirui/work_dirs/cl_coco/xxx -> work_dirs/cl_coco/xxx
+            parts = work_dir.split('/')
+            # Find the part after 'work_dirs' or similar
+            try:
+                work_dirs_idx = -1
+                for i, part in enumerate(parts):
+                    if 'work_dirs' in part.lower() or part == 'work_dirs':
+                        work_dirs_idx = i
+                        break
+                if work_dirs_idx >= 0:
+                    rel_path = '/'.join(parts[work_dirs_idx:])
+                    self._work_dir = osp.join(project_root, rel_path)
+                else:
+                    # Fallback: use filename-based path
+                    import re
+                    # Extract config name from work_dir if possible
+                    config_name = osp.basename(work_dir)
+                    self._work_dir = osp.join(project_root, 'work_dirs', config_name)
+            except:
+                # If parsing fails, use a default path
+                self._work_dir = osp.join(project_root, 'work_dirs', osp.basename(work_dir))
+        else:
+            # Already a valid absolute path
+            self._work_dir = work_dir
         mmengine.mkdir_or_exist(self._work_dir)
 
         # recursively copy the `cfg` because `self.cfg` will be modified
@@ -294,9 +332,13 @@ class EWPRRunner(Runner):
         # Auto-load checkpoint from previous task if load_from is not specified
         if self.previous_dir != None and load_from == None:
             for i in os.listdir(self.previous_dir):
-                if self.ckpt_keywords in i:
+                # Only match .pth files, skip directories
+                if not i.endswith('.pth'):
+                    continue
+                # If ckpt_keywords is None, match all files; otherwise match files containing the keyword
+                if self.ckpt_keywords is None or self.ckpt_keywords in i:
+                    load_from = osp.join(self.previous_dir, i)
                     break
-            load_from = osp.join(self.previous_dir, i)
         # ========== MODIFICATION END ==========
             
         self._load_from = load_from
@@ -648,7 +690,6 @@ class EWPRRunner(Runner):
         
         # Call model's get_eigens method (directly matches model parameters with fea_in keys)
         model.get_eigens(self.fea_in)
-        model.get_transforms(offset=self.offset)
         
         del self.fea_in
         
@@ -671,10 +712,17 @@ class EWPRRunner(Runner):
         # self._has_loaded = None
         self.fea_in = defaultdict(dict)
         
+        load_from = None
         for i in os.listdir(self.work_dir):
-            if self.ckpt_keywords in i:
+            # Only match .pth files, skip directories
+            if not i.endswith('.pth'):
+                continue
+            # If ckpt_keywords is None, match all files; otherwise match files containing the keyword
+            if self.ckpt_keywords is None or self.ckpt_keywords in i:
+                load_from = osp.join(self.work_dir, i)
                 break
-        load_from = osp.join(self.work_dir, i)
+        if load_from is None:
+            raise FileNotFoundError(f"No checkpoint file found in {self.work_dir} matching keywords '{self.ckpt_keywords}'")
         self._load_from = load_from
         self.load_or_resume()
         
@@ -743,10 +791,17 @@ class EWPRRunner(Runner):
         # self._has_loaded = None
         # self.fea_in = defaultdict(dict)
         
+        load_from = None
         for i in os.listdir(self.work_dir):
-            if self.ckpt_keywords in i:
+            # Only match .pth files, skip directories
+            if not i.endswith('.pth'):
+                continue
+            # If ckpt_keywords is None, match all files; otherwise match files containing the keyword
+            if self.ckpt_keywords is None or self.ckpt_keywords in i:
+                load_from = osp.join(self.work_dir, i)
                 break
-            load_from = osp.join(self.work_dir, i)
+        if load_from is None:
+            raise FileNotFoundError(f"No checkpoint file found in {self.work_dir} matching keywords '{self.ckpt_keywords}'")
         self._load_from = load_from
         self.load_or_resume()
         # print(get_rank(), 'load done')

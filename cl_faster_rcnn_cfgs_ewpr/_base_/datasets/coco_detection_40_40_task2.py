@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'CocoTaskDataset'
-data_root = '/home/Newdisk/wuqirui/datasets/Coco/'
+data_root = '/data3/code/fzc/data/coco/coco/'
 task_id = 2
 train_task_split = [0, 40, 80]
 val_task_split = [0, train_task_split[task_id]]
@@ -37,8 +37,8 @@ test_pipeline = [
                    'scale_factor'))
 ]
 train_dataloader = dict(
-    batch_size=4,
-    num_workers=8,
+    batch_size=16,
+    num_workers=2,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
     batch_sampler=dict(type='AspectRatioBatchSampler'),

@@ -42,7 +42,7 @@ model = dict(
         norm_cfg=dict(type='BN', requires_grad=True),
         norm_eval=True,
         style='pytorch',
-        init_cfg=dict(type='Pretrained', checkpoint="pretrained/resnet50-0676ba61.pth")),
+        init_cfg=dict(type='Pretrained', checkpoint="/data3/code/fzc/code1/NSGP-RePRE/imagenet_pretrained_backbone.pth")),
     neck=dict(
         type='FPN',
         in_channels=[256, 512, 1024, 2048],
@@ -144,3 +144,6 @@ model = dict(
         # e.g., nms=dict(type='soft_nms', iou_threshold=0.5, min_score=0.05)
     ))
 
+# Override save_best to use bbox_mAP instead of auto-selected metric
+default_hooks = dict(
+    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=1, save_best='coco/bbox_mAP', rule='greater'))

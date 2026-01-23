@@ -10,16 +10,17 @@ param_scheduler = [
     dict(
         type='MultiStepLR',
         begin=0,
-        end=12,
+        end=30,
         by_epoch=True,
-        milestones=[8, 11],
+        milestones=[20, 25],
         gamma=0.1)
 ]
 
 # optimizer
 optim_wrapper = dict(
     type='OptimWrapper',
-    optimizer=dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0001))
+    optimizer=dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0001),
+    clip_grad=dict(max_norm=35, norm_type=2))
 
 # Default setting for scaling LR automatically
 #   - `enable` means enable scaling LR automatically
